@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>料台视觉标注台 · 原型</title>
+<link rel="stylesheet" href="styles.css?v=20261103b">
+</head>
+<body class="no-media">
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◧</span>
+    <span class="brand-name">料台视觉标注台</span>
+    <span class="brand-sub">Q/HMZH 001—2026</span>
+  </div>
+  <div class="top-actions">
+    <div class="act-group">
+      <span class="act-label">采集</span>
+      <button class="btn ghost" id="btnImport" title="批量导入当天采集的图片或视频；视频在浏览器内按 5 fps 抽帧（最多 200 帧，超出均匀降采样），不需要 ffmpeg 或后端">批量导入</button>
+      <button class="btn ghost" id="btnOutDir" title="设置标注成果的输出目录，S09 与 COCO 都会直接写到这里；未设置则走浏览器下载">输出目录: 未设置</button>
+      <button class="btn ghost" id="btnWizardMode" title="只保留 3 步：对准料台 → AI 预标注确认 → 导出。高级工具与锁定判据自动隐藏">向导模式</button>
+    </div>
+    <div class="act-group">
+      <span class="act-label">AI</span>
+      <button class="btn ghost" id="btnAIPreannotate" title="只遍历稳定窗（绿段）帧：逐帧调用本地 LM Studio 多模态模型（qwen/qwen3-vl-8b）做预标注，按钮上显示处理进度，完成后进入逐帧人工微调">批量 AI 预标注</button>
+    </div>
+    <div class="act-group">
+      <span class="act-label">导出</span>
+      <button class="btn ghost" id="btnExport">JSON</button>
+      <button class="btn ghost" id="btnCoco" title="导出 COCO：5 类检测 + 群体分割">COCO</button>
+      <button class="btn ghost" id="btnPackage" title="按 §15.4 生成批次交付包：images / annotations / metadata.csv / README.md / calib / checksums.sha256（需先设置输出目录）">数据包</button>
+    </div>
+    <div class="act-group">
+      <button class="btn ghost" id="btnIssue">问题回传</button>
+      <button class="btn ghost" id="btnSkip">跳过本帧</button>
+      <button class="btn primary" id="btnSave">保存并下一帧</button>
+    </div>
+    <div class="avatar">A-07</div>
+  </div>
+</header>
+
+<div class="statusbar">
+  <span class="frame-id mono">未导入素材</span>
+  <span class="chip" id="chipFrameQ">未导入</span>
+  <div class="quality-chips">
+    <span class="chip ok" id="chipPxcm" title="横向跨度 / 料台边长，随四角拖动实时重算">px/cm 11.3 · 达标</span>
+    <span class="chip bad" id="chipStable">稳定窗 —</span>
+    <span class="chip bad" id="chipEligible">资格 —</span>
+    <span class="chip" id="phaseChip" title="平台阶段：一期收基础档群体级真值；二期起逐尾强制">一期 · 群体级真值</span>
+  </div>
+  <span class="reason-label">原因码</span>
+  <span class="code-list" id="reasonCodes"><span class="code">—</span></span>
+  <span class="reason-note" id="reasonNote">按 §5.3 / §5.4 / §6.6 实时判定</span>
+</div>
+
+<main class="workspace">
+
+  <nav class="toolrail">
+    <button class="tool active" data-tool="select" title="选择 / 移动 (V)">
+      <svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.5L10 19z"/></svg><span>V</span>
+    </button>
+    <button class="tool" data-tool="quad" title="四点角点 (Q)">
+      <svg viewBox="0 0 24 24"><path d="M4 4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="12" r="2.4"/></svg><span>Q</span>
+    </button>
+    <button class="tool" data-tool="poly" title="多边形掩膜 (P)">
+      <svg viewBox="0 0 24 24"><path d="M12 3l8 5-3 10H7L4 8z"/></svg><span>P</span>
+    </button>
+    <button class="tool" data-tool="brush" title="语义分割笔刷 (B)">
+      <svg viewBox="0 0 24 24"><path d="M4 20c3-1 4-4 4-8V4h5v8c0 4 1 7 4 8z"/></svg><span>B</span>
+    </button>
+    <button class="tool" data-tool="box" title="实例框 (R)">
+      <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg><span>R</span>
+    </button>
+    <button class="tool" data-tool="point" title="点标注 (K)">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>K</span>
+    </button>
+    <div class="rail-sep"></div>
+    <button class="tool" data-tool="undo" title="撤销 (⌘Z)">
+      <svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5M4 12h10a5 5 0 010 10"/></svg>
+    </button>
+  </nav>
+
+  <aside class="wizard" id="wizardPanel" hidden>
+    <div class="wz-head">
+      <span class="wz-title">本帧只需 3 步</span>
+      <div class="wz-dots"><i class="on"></i><i></i><i></i></div>
+    </div>
+
+    <div class="wz-step" data-step="1">
+      <div class="wz-h">① 对准料台</div>
+      <p class="wz-p">把画面上的 4 个青色角点 Q1–Q4 拖到料台四角，再在底部填<b>现场实测边长</b>（圆形则填直径）。橙色虚线是 AI 猜的轮廓，可点「AI 轮廓 → 角点」直接套用后再微调。</p>
+      <div class="wz-kv"><span>当前 px/cm</span><b id="wzPxcm">—</b></div>
+      <div class="wz-kv"><span>达标线</span><b>≥ 10</b></div>
+      <div class="wz-note" id="wzS1Note">这一步是后面所有尺寸的根：虾多长、盘面多大都靠它。</div>
+      <button class="btn primary" id="wzNext1" disabled>下一步：AI 预标注</button>
+    </div>
+
+    <div class="wz-step" data-step="2" hidden>
+      <div class="wz-h">② AI 预标注 + 你确认</div>
+      <p class="wz-p">让本地模型先猜一遍（分布形态 P、尾肢 A5、残饵点、料台轮廓），你再检查。约 1 分钟，不消耗 token。</p>
+      <button class="btn primary" id="wzRunAI">开始 AI 预标注</button>
+      <ul class="wz-result" id="wzResult" hidden>
+        <li><span>分布形态</span><b id="wzP">—</b></li>
+        <li><span>尾肢 A5</span><b id="wzA5">—</b></li>
+        <li><span>残饵点</span><b id="wzFeed">—</b></li>
+        <li><span>料台轮廓</span><b id="wzTray">—</b></li>
+      </ul>
+      <div class="wz-row">
+        <button class="btn ghost" id="wzBackFull">我要手动改</button>
+        <button class="btn primary" id="wzAccept" disabled>结果没问题</button>
+      </div>
+      <button class="btn ghost" id="wzNext2" hidden>下一步：导出</button>
+    </div>
+
+    <div class="wz-step" data-step="3" hidden>
+      <div class="wz-h">③ 导出成果</div>
+      <p class="wz-p">S09 是完整档案（标定 + 判据 + 审计，人看和审计用）；COCO 是三类标注（虾群分割 / 单虾框 / 残饵点），可直接喂训练管线。</p>
+      <div class="wz-kv"><span>对象数</span><b id="wzObjN">—</b></div>
+      <div class="wz-kv"><span>可进训练集</span><b id="wzAdmission">—</b></div>
+      <div class="wz-kv"><span>输出目录</span><b id="wzOutDir" title="点击设置/更换输出目录，导出会直接写入">未设置</b></div>
+      <div class="wz-note" id="wzAdmNote"></div>
+      <div class="wz-row">
+        <button class="btn primary" id="wzExportS09">导出 S09</button>
+        <button class="btn ghost" id="wzExportCoco">导出 COCO</button>
+      </div>
+      <button class="btn ghost" id="wzRestart">换下一帧</button>
+    </div>
+  </aside>
+
+  <aside class="catpanel">
+    <div class="panel-title">标注类目 <span class="count" id="objCount">17</span></div>
+    <div class="cat-list" id="catList">
+      <button class="cat active" data-key="Q"><i class="sw cyan"></i><span class="cat-name">Q1–Q4 料台四角</span><span class="cat-tag">4 点</span><span class="n">4</span></button>
+      <button class="cat" data-key="S"><i class="sw blue"></i><span class="cat-name">S 虾群剪影</span><span class="cat-tag">分割</span><span class="n">1</span></button>
+      <button class="cat" data-key="R"><i class="sw red"></i><span class="cat-name">R 提绳 · ignore</span><span class="cat-tag">掩膜</span><span class="n">3</span></button>
+      <button class="cat" data-key="I"><i class="sw green"></i><span class="cat-name">I 边缘区个体</span><span class="cat-tag">实例</span><span class="n">3</span></button>
+      <button class="cat" data-key="BF"><i class="sw magenta"></i><span class="cat-name">BF 残饵</span><span class="cat-tag">点</span><span class="n">6</span></button>
+      <div class="boxclass">
+        <span>框选类别</span>
+        <select id="boxClass" class="meta-sel">
+          <option value="shrimp">虾个体</option>
+          <option value="molt">蜕壳</option>
+          <option value="dead">死亡个体</option>
+          <option value="head_shell">头壳</option>
+          <option value="meat_fragment">肉段</option>
+          <option value="feces">粪块</option>
+        </select>
+      </div>
+      <div class="empty-cat">＋ 新建类目需走 S11 回传审批</div>
+    </div>
+
+    <div class="panel-title small">本帧几何校验</div>
+    <ul class="chk">
+      <li><b>ok</b>四角完整入画</li>
+      <li><b>ok</b>锐度 882 ≥ 300</li>
+      <li><b>ok</b>高光 0.008% ≤ 0.5%</li>
+      <li class="fail" id="liStable"><b>×</b>稳定窗 —</li>
+      <li class="fail"><b>x</b>累计漂移 191 px</li>
+      <li class="fail" id="liColor"><b>×</b>色彩标定未录入</li>
+    </ul>
+  </aside>
+
+  <section class="stagewrap">
+    <div class="stage">
+      <div class="canvas-stage" id="canvasStage">
+        <img alt="当前帧" id="frameImg" draggable="false">
+        <svg class="overlay" id="overlay" viewBox="0 0 1440 1920" preserveAspectRatio="xMidYMid meet">
+          <polygon class="roi" id="roiPoly" points="184,580 1290,470 1400,1636 246,1720"/>
+          <g id="layerTray"></g>
+          <g id="layerRope"></g>
+          <g id="layerSchool"></g>
+          <circle class="centerZone" id="centerZone" cx="780" cy="1102" r="284"/>
+          <g id="layerInst"></g>
+          <g id="layerFeed"></g>
+          <g id="layerQuad"></g>
+          <rect id="draft" class="draft" x="0" y="0" width="0" height="0" visibility="hidden"/>
+          <text class="zoneLabel" id="zoneLabel" x="780" y="792" text-anchor="middle">中央区 ∅50cm · 禁止逐尾</text>
+        </svg>
+      </div>
+      <div class="stage-empty" id="stageEmpty">
+        <div class="se-title">尚未导入素材</div>
+        <p class="se-note">导入当天采集的图片或视频；视频在浏览器内按 5 fps 抽帧，不需要 ffmpeg 或后端。</p>
+        <div class="se-actions">
+          <button class="btn primary" id="btnEmptyImport">批量导入</button>
+          <button class="btn ghost" id="btnEmptySample">载入示例</button>
+        </div>
+      </div>
+      <div class="stage-tip" id="proofHint" hidden>现在逐帧人工微调：拖动时间轴游标 → 检查 → 修正 → 保存</div>
+      <div class="stage-warn" id="stageWarn" hidden>该帧在不合格段 · 不可用于标注</div>
+    </div>
+    <div class="stage-foot">
+      <span class="mono" id="dimOut">— × —</span>
+      <span class="sep">·</span><span class="mono" id="framePosOut">frame — / —</span>
+      <span class="sep">·</span>
+      <label class="geo"><span class="geo-label">料台形状</span>
+        <select id="trayShapeSel" class="numer">
+          <option value="square">方形</option>
+          <option value="round">圆形</option>
+        </select>
+      </label>
+      <span class="sep">·</span>
+      <label class="geo" title="按现场实测填写；方形=边长cm，圆形=直径cm；改动会重算 px/cm 与全部档位">
+        <span class="geo-label" id="sizeLabel">边长</span>
+        <input id="sideCm" class="numer" type="number" value="100" min="40" max="200" step="1"> cm
+      </label>
+      <span class="side-preset">
+        <button class="btn ghost mini" data-side="80">80</button>
+        <button class="btn ghost mini" data-side="100">100</button>
+      </span>
+      <span class="sep">·</span>
+      <button class="btn ghost mini" id="btnAlignTrayCorners" title="把 AI 预标的料台轮廓复制到 Corners（仅在形状匹配时可用）">AI 轮廓 → 角点</button>
+      <span class="sep">·</span>
+      <span class="geo">px/cm <b id="pxcmOut">11.3</b></span>
+      <span class="sep">·</span>
+      <span class="geo mono" id="edgesOut">1112 / 1171 / 1157 / 1142</span>
+      <span class="sep">·</span>
+      <span class="geo">缩放 <b id="zoomOut">1.0×</b></span>
+      <span class="sep">·</span>
+      <button class="btn ghost mini" id="btnReuse">几何复用整段</button>
+      <span class="spacer"></span>
+      <span class="hint"><kbd>V</kbd>选择</span>
+      <span class="hint"><kbd>Q</kbd>四点</span>
+      <span class="hint"><kbd>B</kbd>笔刷</span>
+      <span class="hint"><kbd>⌘Z</kbd>撤销</span>
+      <span class="hint"><kbd>Alt</kbd>加/删顶点</span>
+    </div>
+  </section>
+
+  <aside class="inspector">
+    <div class="insp-head">
+      <div>
+        <div class="panel-title">判据面板 <span class="dim-ref">规程六维 + PRD A–H</span></div>
+        <div class="phase" id="phaseTog">
+          <button class="on" data-phase="1">一期 · 代理值</button>
+          <button data-phase="2">二期 · 逐尾强制</button>
+        </div>
+      </div>
+      <label class="switch"><input type="checkbox" id="onlyJudgeable"><span></span>只看可判</label>
+    </div>
+
+    <div class="insp-scroll">
+
+    <div class="meta" id="metaPanel">
+      <div class="meta-head">
+        <span>采集信息 <em>§5.3.1 / §15.4</em></span>
+        <button class="btn ghost mini" id="btnMetaToggle" title="展开或收起采集信息">收起</button>
+      </div>
+      <div class="meta-body" id="metaBody">
+        <div class="gate-row"><span>棚号 pond_id</span>
+          <input id="pondId" class="meta-input" placeholder="P03" value="P03"></div>
+        <div class="gate-row"><span>观测号 obs_id</span>
+          <input id="obsId" class="meta-input" placeholder="T02-20261101-0830" value="T02-20261101-0830"></div>
+        <div class="gate-row"><span>设备号 device_id</span>
+          <input id="deviceId" class="meta-input" placeholder="CAM-01" value="CAM-01"></div>
+        <div class="gate-row"><span>采集时间</span>
+          <input id="shootTime" class="meta-input" type="datetime-local" value="2026-11-01T08:30"></div>
+        <div class="gate-row"><span>色卡版本 <em>§6.6.3</em></span>
+          <input id="calibVer" class="meta-input" placeholder="CC-2026A" value=""></div>
+        <div class="gate-row"><span>灰阶 ΔE00 <em>≤3.0</em></span>
+          <input id="deltaEGray" class="meta-input short" type="number" step="0.1" min="0" max="30" value=""></div>
+        <div class="gate-row"><span>24 色平均 ΔE00 <em>≤5.0</em></span>
+          <input id="deltaEColor" class="meta-input short" type="number" step="0.1" min="0" max="30" value=""></div>
+      </div>
+    </div>
+
+    <div class="gate">
+      <div class="gate-row"><span>采样率</span><b class="ok" id="gatePx">11.3 ≥ 10</b></div>
+      <div class="gate-row"><span>固定机位</span>
+        <select id="fixedCamera" class="meta-sel">
+          <option value="1">是 · 三脚架/固定</option>
+          <option value="0" selected>否 · 手持</option>
+        </select></div>
+      <div class="gate-row"><span>白平衡卡</span>
+        <select id="wbCard" class="meta-sel">
+          <option value="1">有 · 已入画</option>
+          <option value="0" selected>无</option>
+        </select></div>
+      <div class="gate-row"><span>稳定期 s</span>
+        <input id="stableWin" class="meta-input short" type="number" value="0.5" min="0" max="60" step="0.1"></div>
+      <div class="gate-row"><span>判读资格</span><b class="bad" id="gateEligible">否</b></div>
+      <div class="gate-hint" id="gateHint">各项按 §5.3 / §5.4 / §6.6 判定；未过资格只可作审计样本</div>
+    </div>
+
+    <div class="meta" id="blindPanel">
+      <div class="meta-head">
+        <span>双人盲标一致性 <em>§15.3</em></span>
+        <b class="bad" id="kappaOut">未录入</b>
+      </div>
+      <div class="gate-row"><span>标注员 A</span>
+        <input id="annotatorId" class="meta-input" value="A-07"></div>
+      <div class="gate-row"><span>复核员 B</span>
+        <input id="annotatorId2" class="meta-input" placeholder="B-12" value=""></div>
+      <textarea id="secondPass" class="meta-ta" placeholder="B 的盲标，例如：A1=1, B2=2, C=1, P=P1"></textarea>
+      <div class="gate-row"><span>覆盖率 / kappa</span><b id="kappaStat">—</b></div>
+      <button class="btn ghost mini" id="btnKappa" title="按 §15.3：双人盲标覆盖率 ≥20%、kappa ≥0.60 方可验收">计算一致性</button>
+    </div>
+
+    <div class="ptgate" id="ptGate">
+      <span>边缘区逐尾 A5</span>
+      <b id="ptCount">0 / 3</b>
+      <em id="ptNote">一期：未逐尾用帧级代理，可导出</em>
+    </div>
+
+    <div class="objinfo" id="objInfo">
+      <div class="oi-row"><span>当前对象</span><b>未选中</b></div>
+      <div class="oi-hint">点选图上对象；方向键 1 px 微调，Shift+方向键 10 px</div>
+    </div>
+
+    <div class="healthbar" id="healthBar" hidden>
+      <span class="hb-label">个体健康</span>
+      <button class="hb" data-health="healthy">健康</button>
+      <button class="hb" data-health="subhealth">亚健康</button>
+      <button class="hb" data-health="sick">病虾</button>
+      <button class="hb hb-clear" data-health="">清除</button>
+    </div>
+
+    <div class="healthbar" id="colorBar" hidden>
+      <span class="hb-label">头壳 / 蜕壳颜色</span>
+      <button class="hb" data-color="light">浅色</button>
+      <button class="hb" data-color="yellow">发黄</button>
+      <button class="hb" data-color="dark">发黑</button>
+      <button class="hb hb-clear" data-color="">清除</button>
+    </div>
+
+    <div id="judgeList">
+
+      <div class="dimsec">
+        <div class="dimhead">群体级 <em>§8.9 / §8.10</em></div>
+
+        <div class="judge" data-key="P">
+          <div class="judge-head"><span class="dot cyan"></span>P 盘面分布形态<span class="badge ok">可判</span></div>
+          <div class="optrow" data-group="P">
+            <button class="on">P1</button><button>P2</button><button>P3</button><button>P4</button><button class="nine">P9</button>
+          </div>
+          <div class="judge-val">当前：<b>P1 中央堆叠</b> · 中央区剪影占比 62%</div>
+        </div>
+
+        <div class="judge">
+          <div class="judge-head"><span class="dot cyan"></span>M 群体指标<span class="badge ok">自动计算</span></div>
+          <div class="metrics">
+            <div><span>盘面占用率</span><b id="mOcc">—</b></div>
+            <div><span>边缘区可见虾数</span><b id="mEdgeN">—</b></div>
+            <div><span>聚集区长宽比</span><b id="mAspect">—</b></div>
+            <div><span>重心偏移</span><b id="mOff">—</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dimsec">
+        <div class="dimhead">A 体表完整性 <em>§8.3</em></div>
+
+        <div class="judge" data-key="A5">
+          <div class="judge-head"><span class="dot green"></span>A5 尾肢完整性<span class="badge ok">基础档 · 仅边缘区</span></div>
+          <div class="optrow" data-group="A5">
+            <button>0</button><button class="on">1</button><button>2</button><button>3</button><button>4</button><button class="nine">9</button>
+          </div>
+          <div class="judge-val" id="a5Note">当前：<b>1</b> · 缺损 1–2 片 · 一期帧级代理，选中个体框后写该尾</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot"></span>A1 触须 / A2 眼 / A3 额角<span class="badge lock">🔒 需 20 px/cm</span></div>
+          <div class="optrow" data-group="A1-A3">
+            <button disabled>0</button><button disabled>2</button><button disabled>4</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">本帧 11.3 px/cm，判别档不足 → 9</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot"></span>A4 外骨骼病灶<span class="badge lock">🔒 资格剔除</span></div>
+          <div class="optrow" data-group="A4">
+            <button disabled>0</button><button disabled>2</button><button disabled>4</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">无固定机位/白卡，个体类不具判读资格 → 9</div>
+        </div>
+      </div>
+
+      <div class="dimsec dim-lock">
+        <div class="dimhead">B 体色与鳃 <em>§8.4</em></div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot blue"></span>B2 体色异常<span class="badge lock">🔒 无白卡</span></div>
+          <div class="optrow" data-group="B2">
+            <button disabled>0</button><button disabled>2</button><button disabled>4</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">跨设备不得比较绝对色值（§8.4）→ 9；专家：亚硝酸盐高→体色暗红暗黑，底质恶化→身现麻点</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot blue"></span>B3 鳃<span class="badge lock">待特写站接入</span></div>
+          <div class="optrow" data-group="B3">
+            <button disabled>0</button><button disabled>2</button><button disabled>4</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">特写站已批采购、本帧未接入 → 9；专家：鳃分黑鳃/黄鳃/烂鳃三类，分级定义待补充</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot blue"></span>C4 附肢颜色（步足 / 游泳足）<span class="badge lock">🔒 无白卡</span></div>
+          <div class="optrow" data-group="C4">
+            <button disabled>正常</button><button disabled>发黄</button><button disabled>发黑</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">PRD C4 · 专家：步足与游泳足发黄发黑 → 底质腐败早期信号；正常为浅褐半透明</div>
+        </div>
+      </div>
+
+      <div class="dimsec dim-lock">
+        <div class="dimhead">C 姿态与活动 <em>§8.5 / §8.6</em></div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot amber"></span>C1–C4 姿态等级<span class="badge lock">🔒 非稳定期</span></div>
+          <div class="optrow" data-group="C">
+            <button disabled>0</button><button disabled>2</button><button disabled>4</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">稳定窗 0.5 s，虾体处于应激态，不可判 → 9</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot amber"></span>C-A 攻击与残食<span class="badge lock">🔒 棚级指标</span></div>
+          <div class="optrow" data-group="CA">
+            <button disabled>0</button><button disabled>1</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">需逐尾统计尾肢缺损率，一期无逐尾 → 9</div>
+        </div>
+      </div>
+
+      <div class="dimsec dim-lock">
+        <div class="dimhead">D 肠道与内脏 <em>§8.7 / PRD D</em></div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot"></span>D1 肠道饱满度<span class="badge lock">待特写站接入</span></div>
+          <div class="optrow" data-group="D">
+            <button disabled>0</button><button disabled>2</button><button disabled>4</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">需 ≥40 px/cm 特写机位；特写站已批采购、本帧未接入 → 本帧 9</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot"></span>D2 肠道内容物颜色<span class="badge lock">待特写站接入</span></div>
+          <div class="optrow" data-group="D2">
+            <button disabled>棕褐</button><button disabled>发白</button><button disabled>发黑</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">PRD D2 · 发白提示白便（蛋白负担/肠炎），发黑提示消化异常</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot"></span>D4 肝胰腺<span class="badge lock">待特写站接入</span></div>
+          <div class="optrow" data-group="D4">
+            <button disabled>正常</button><button disabled>萎缩</button><button disabled>变色</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">PRD D4 · 需微距；轮廓清晰、色正为正常</div>
+        </div>
+      </div>
+
+      <div class="dimsec dim-lock">
+        <div class="dimhead">E 体长与体重 <em>§8.8</em></div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot"></span>E 体长 / 体重<span class="badge lock">🔒 不作记录值</span></div>
+          <div class="optrow" data-group="E">
+            <button disabled>—</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">目测估计仅可分层抽样；记录值须随机取样实测（§8.8 / §12.2）</div>
+        </div>
+      </div>
+
+      <div class="dimsec dim-lock">
+        <div class="dimhead">F 摄食档 <em>§8.2</em></div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot amber"></span>F0–F4 摄食档<span class="badge lock">🔒 非稳定期</span></div>
+          <div class="optrow" data-group="F">
+            <button disabled>F0</button><button disabled>F1</button><button disabled>F2</button><button disabled>F3</button><button disabled>F4</button><button class="nine" disabled>F9</button>
+          </div>
+          <div class="judge-val locknote">残饵与底泥同色，覆盖率不可分 → 9</div>
+        </div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot amber"></span>F3 粪便形态<span class="badge lock">🔒 非稳定期</span></div>
+          <div class="optrow" data-group="F3">
+            <button disabled>成形</button><button disabled>细软碎</button><button disabled>发白</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">PRD F3 · 粪便长短适中、成形为正常；细软碎（&lt;1cm）、发白提示肠炎</div>
+        </div>
+      </div>
+
+      <div class="dimsec">
+        <div class="dimhead">蜕壳残体 <em>PRD E · P0</em></div>
+
+        <div class="judge">
+          <div class="judge-head"><span class="dot amber"></span>E1 头壳数量与颜色<span class="badge lock">自动聚合</span></div>
+          <div class="optrow" data-group="E1">
+            <button disabled>少量浅色</button><button disabled>大量发黄</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote" id="E1val">由图上对象计数自动聚合，不手填 · 头壳需框出并录颜色</div>
+        </div>
+
+        <div class="judge">
+          <div class="judge-head"><span class="dot amber"></span>E3 死虾与肉段<span class="badge lock">自动聚合</span></div>
+          <div class="optrow" data-group="E3">
+            <button disabled>无</button><button disabled>有</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote" id="E3val">由图上对象计数自动聚合，不手填 · 死虾与肉段分别框</div>
+        </div>
+      </div>
+
+      <div class="dimsec">
+        <div class="dimhead">活力与病健比 <em>PRD G · P0</em></div>
+
+        <div class="judge">
+          <div class="judge-head"><span class="dot green"></span>G2 病健比<span class="badge lock">对象聚合</span></div>
+          <div class="optrow" data-group="G2">
+            <button disabled>健康为主</button><button disabled>亚健康</button><button disabled>病虾占比高</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val" id="G2val">样本不足 → 9</div>
+          <div class="judge-val locknote">由个体健康标签聚合，病虾数 / 已标尾数；样本&lt;10 尾或覆盖&lt;60% 时记 9</div>
+        </div>
+      </div>
+
+      <div class="dimsec dim-lock">
+        <div class="dimhead">环境 <em>PRD H · 传感器</em></div>
+
+        <div class="judge locked">
+          <div class="judge-head"><span class="dot cyan"></span>H1–H4 溶氧 / pH / 水温 / 亚硝酸盐<span class="badge lock">非视觉</span></div>
+          <div class="optrow" data-group="H">
+            <button disabled>由传感器接入</button><button class="nine" disabled>9</button>
+          </div>
+          <div class="judge-val locknote">非视觉维度；由 RS485 传感器接入，标注台仅留字段与视觉结果交叉研判</div>
+        </div>
+      </div>
+
+    </div>
+
+    </div><!-- /insp-scroll -->
+
+    <div class="insp-foot">
+      <div class="prog"><span>AI 预标注 / 人工修正</span><b id="humanCount">0 / 17</b></div>
+      <div class="prog"><span>本帧完成度</span><b>2 / 2 可判 · 其余待设备/标准</b></div>
+      <div class="prog"><span>9 类占比（单帧预警）</span><b id="nineRatio">73%</b></div>
+      <div class="bar"><i style="width:100%"></i></div>
+    </div>
+  </aside>
+</main>
+
+<footer class="timeline">
+  <div class="tl-head">
+    <div class="tl-title" id="tlTitle">时间轴 · 未导入素材</div>
+    <div class="tl-meta mono" id="tlMeta">—</div>
+    <div class="tl-legend">
+      <span><i class="lg ok"></i>稳定窗</span>
+      <span><i class="lg bad"></i>不合格段</span>
+      <span><i class="lg key"></i>关键帧</span>
+    </div>
+  </div>
+  <div class="tl-body">
+    <div class="tl-ruler empty" id="ruler">
+      <div class="tl-empty">导入素材后自动计算稳定窗</div>
+      <div class="playhead" id="playhead" hidden><span>—</span></div>
+      <div class="tl-ticks"></div>
+    </div>
+    <div class="tl-frames" id="tlFrames">
+      <span class="tl-note" id="tlNote">导入素材后生成缩略帧</span>
+    </div>
+  </div>
+</footer>
+
+<div class="toast" id="toast"></div>
+<input type="file" id="fileInput" multiple accept="image/*,video/*" hidden>
+<script src="app.js?v=20261106c"></script>
+</body>
+</html>
